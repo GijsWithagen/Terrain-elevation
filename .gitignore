@@ -172,3 +172,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+/bin
+/etc
+/share
+pyvenv.cfg
+
+/datasets
+
+/output/*
+!output/.gitkeep
