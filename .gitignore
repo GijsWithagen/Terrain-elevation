@@ -181,4 +181,4 @@ pyvenv.cfg
 /datasets
 
 /output/*
-!output/.gitkeep
+!*/.gitkeep
