@@ -8,6 +8,7 @@ import pydeck # Added for 3D visualization
 import matplotlib.pyplot as plt
 import matplotlib.colors
 import os
+import pydeck as pdk
 
 def create_overlay_image(data_array, cmap_name='terrain', nodata_val=None):
     """
@@ -144,10 +145,16 @@ def display_tifs_on_map(tif_file_paths, output_html_file='elevation_map.html',
         print(f"Error saving map: {e}")
 
 
-def create_3d_point_cloud_map(tif_file_paths, output_html_file_3d='dsm_3d_map.html',
-                              map_cmap='terrain', subsample_factor=20, z_scale_factor=1):
+def create_3d_point_cloud_map(
+        tif_file_paths, 
+        output_html_file_3d='dsm_3d_map.html',
+        map_cmap='terrain', 
+        subsample_factor=20, 
+        z_scale_factor=1,
+        bounding_box=None
+    ):
     all_points_data = []
-    all_elevations_for_norm = [] # To collect all valid elevations for global normalization
+    all_elevations_for_norm = []
 
     print(f"\nProcessing {len(tif_file_paths)} TIF file(s) for 3D map...")
 
@@ -159,24 +166,18 @@ def create_3d_point_cloud_map(tif_file_paths, output_html_file_3d='dsm_3d_map.ht
             print(f"Processing (3D map): {tif_path}")
             with rasterio.open(tif_path) as src:
                 dst_crs = CRS.from_epsg(4326)
-                
                 dst_affine, dst_width, dst_height = calculate_default_transform(
                     src.crs, dst_crs, src.width, src.height, *src.bounds
                 )
-                
                 src_nodata_val = src.nodatavals[0] if src.nodatavals and src.nodatavals[0] is not None else None
 
-                if src_nodata_val is not None:
-                    nodata_for_reprojection = src_nodata_val
-                elif np.issubdtype(src.read(1).dtype, np.floating):
-                    nodata_for_reprojection = np.nan
-                else:
-                    nodata_for_reprojection = 0 
+                nodata_for_reprojection = (
+                    src_nodata_val if src_nodata_val is not None
+                    else (np.nan if np.issubdtype(src.read(1).dtype, np.floating) else 0)
+                )
 
-                reprojected_data = np.full((dst_height, dst_width), 
-                                           nodata_for_reprojection, 
-                                           dtype=src.read(1).dtype)
-                
+                reprojected_data = np.full((dst_height, dst_width), nodata_for_reprojection, dtype=src.read(1).dtype)
+
                 reproject(
                     source=rasterio.band(src, 1),
                     destination=reprojected_data,
@@ -192,30 +193,29 @@ def create_3d_point_cloud_map(tif_file_paths, output_html_file_3d='dsm_3d_map.ht
                 rows, cols = np.indices(reprojected_data.shape)
                 rows_sub = rows[::subsample_factor, ::subsample_factor].ravel()
                 cols_sub = cols[::subsample_factor, ::subsample_factor].ravel()
-
                 elevations_sub = reprojected_data[rows_sub, cols_sub]
 
-                if np.isnan(nodata_for_reprojection):
-                    valid_mask = ~np.isnan(elevations_sub)
-                else:
-                    valid_mask = (elevations_sub != nodata_for_reprojection)
-                
+                valid_mask = ~np.isnan(elevations_sub) if np.isnan(nodata_for_reprojection) else (elevations_sub != nodata_for_reprojection)
+
                 rows_sub_valid = rows_sub[valid_mask]
                 cols_sub_valid = cols_sub[valid_mask]
                 elevations_sub_valid = elevations_sub[valid_mask]
-                
-                all_elevations_for_norm.extend(elevations_sub_valid.tolist()) 
 
                 longitudes, latitudes = rasterio.transform.xy(dst_affine, rows_sub_valid, cols_sub_valid)
-                
+
                 for lon, lat, elev in zip(longitudes, latitudes, elevations_sub_valid):
+                    if bounding_box:
+                        min_lon, max_lon, min_lat, max_lat = bounding_box
+                        if not (min_lon <= lon <= max_lon and min_lat <= lat <= max_lat):
+                            continue  # Skip points outside bounding box
                     all_points_data.append({
                         'longitude': lon,
                         'latitude': lat,
-                        'elevation_raw': elev 
+                        'elevation_raw': elev
                     })
-            print(f"Finished processing {os.path.basename(tif_path)} for 3D map.")
+                    all_elevations_for_norm.append(elev)
 
+            print(f"Finished processing {os.path.basename(tif_path)} for 3D map.")
         except Exception as e:
             print(f"Error processing file {tif_path} for 3D map: {e}")
             import traceback
@@ -226,9 +226,9 @@ def create_3d_point_cloud_map(tif_file_paths, output_html_file_3d='dsm_3d_map.ht
         print("No valid elevation values found after processing all files. Cannot create 3D map.")
         return
 
-    vmin_color = np.percentile(valid_elev_array, 2) if valid_elev_array.size > 1 else np.min(valid_elev_array)
-    vmax_color = np.percentile(valid_elev_array, 98) if valid_elev_array.size > 1 else np.max(valid_elev_array)
-    if vmin_color == vmax_color: 
+    vmin_color = np.percentile(valid_elev_array, 2)
+    vmax_color = np.percentile(valid_elev_array, 98)
+    if vmin_color == vmax_color:
         vmin_color -= 0.5
         vmax_color += 0.5
 
@@ -237,16 +237,15 @@ def create_3d_point_cloud_map(tif_file_paths, output_html_file_3d='dsm_3d_map.ht
 
     for point in all_points_data:
         color_rgba_float = cmap_3d(norm_elev_for_color(point['elevation_raw']))
-        point['color'] = (np.array(color_rgba_float[:3]) * 255).astype(np.uint8).tolist() # RGB only for pydeck color
-        point['elevation'] = point['elevation_raw'] * z_scale_factor # Apply Z scaling
+        point['color'] = (np.array(color_rgba_float[:3]) * 255).astype(np.uint8).tolist()
+        point['elevation'] = point['elevation_raw'] * z_scale_factor
 
     df_3d = pd.DataFrame(all_points_data)
-
     if df_3d.empty:
         print("DataFrame for 3D map is empty. Cannot generate 3D map.")
         return
 
-    point_cloud_layer = pydeck.Layer(
+    point_cloud_layer = pdk.Layer(
         'PointCloudLayer',
         data=df_3d,
         get_position='[longitude, latitude, elevation]',
@@ -254,40 +253,36 @@ def create_3d_point_cloud_map(tif_file_paths, output_html_file_3d='dsm_3d_map.ht
         get_normal=[0, 0, 1],
         auto_highlight=True,
         pickable=True,
-        point_size=3 
+        point_size=3
     )
 
-    initial_view_state = pydeck.ViewState(
+    initial_view_state = pdk.ViewState(
         longitude=df_3d['longitude'].mean(),
         latitude=df_3d['latitude'].mean(),
-        zoom=8, 
+        zoom=8,
         pitch=45,
         bearing=0
     )
-    
+
     tooltip = {
         "html": "<b>Elevation:</b> {elevation_raw} m",
-        "style": {
-            "backgroundColor": "steelblue",
-            "color": "white"
-        }
+        "style": {"backgroundColor": "steelblue", "color": "white"}
     }
 
     try:
-        mapbox_api_key = 'pk.eyJ1IjoiZ2lqc3dpdGhhZ2VuIiwiYSI6ImNtYmF6bWw4OTA2Z3QyanNvcnFqd3NqZGMifQ.XKPEq0D0yqxZsMLJQMhTBw'
-        if not mapbox_api_key:
-            print("Warning: MAPBOX_API_KEY environment variable not set. Basemap in 3D view might not load.")
-        
-        r = pydeck.Deck(
+        r = pdk.Deck(
             layers=[point_cloud_layer],
             initial_view_state=initial_view_state,
-            map_style='mapbox://styles/mapbox/light-v10', 
-            tooltip=tooltip
+            map_provider="mapbox",
+            api_keys={
+                'mapbox': 'pk.eyJ1IjoiZ2lqc3dpdGhhZ2VuIiwiYSI6ImNtYmF6bWw4OTA2Z3QyanNvcnFqd3NqZGMifQ.XKPEq0D0yqxZsMLJQMhTBw'
+            },
+            # map_style='mapbox://styles/mapbox/light-v10',
+            tooltip=tooltip,
+            
         )
         r.to_html(output_html_file_3d)
         print(f"3D Point Cloud Map successfully saved to: {output_html_file_3d}")
-        if not mapbox_api_key:
-             print("To see the base map in the 3D view, please set your MAPBOX_API_KEY environment variable and re-run.")
     except Exception as e:
         print(f"Error creating or saving 3D map with Pydeck: {e}")
         import traceback
@@ -309,26 +304,40 @@ if __name__ == '__main__':
         "datasets/dtm/2024_M5_51GN1.TIF",
     ]
 
-    display_tifs_on_map(
-        tif_dsm_files, 
-        output_html_file='output/netherlands_dsm_2d_map.html', 
-        map_cmap='terrain', 
-        map_opacity=0.75
-    )
+    # display_tifs_on_map(
+    #     tif_dsm_files, 
+    #     output_html_file='output/netherlands_dsm_2d_map.html', 
+    #     map_cmap='terrain', 
+    #     map_opacity=0.75
+    # )
 
-    display_tifs_on_map(
-        tif_dtm_files, 
-        output_html_file='output/netherlands_dtm_2d_map.html', 
-        map_cmap='terrain', 
-        map_opacity=0.75
-    )
+    # display_tifs_on_map(
+    #     tif_dtm_files, 
+    #     output_html_file='output/netherlands_dtm_2d_map.html', 
+    #     map_cmap='terrain', 
+    #     map_opacity=0.75
+    # )
     
     create_3d_point_cloud_map(
-        tif_dsm_files,
-        output_html_file_3d='output/netherlands_dsm_3d_map.html',
+        [
+         "datasets/dsm/2024_R_51GN1.TIF",
+        ],
+        output_html_file_3d='output/atlas_3d.html',
         map_cmap='terrain',
-        subsample_factor=20, 
-        z_scale_factor=5 
+        subsample_factor=1, 
+        z_scale_factor=1,
+        bounding_box=(5.484705, 5.486861, 51.446943, 51.448714)
+    )
+
+    create_3d_point_cloud_map(
+        [
+         "datasets/dsm/2024_R_51GN1.TIF",
+        ],
+        output_html_file_3d='output/campus_3d.html',
+        map_cmap='terrain',
+        subsample_factor=1, 
+        z_scale_factor=1,
+        bounding_box=(5.482617, 5.494170, 51.445511,51.450016)
     )
 
     create_3d_point_cloud_map(
@@ -336,5 +345,5 @@ if __name__ == '__main__':
         output_html_file_3d='output/netherlands_dtm_3d_map.html',
         map_cmap='terrain',
         subsample_factor=20, 
-        z_scale_factor=5 
+        z_scale_factor=1 
     )
