@@ -275,11 +275,9 @@ def create_3d_point_cloud_map(
             initial_view_state=initial_view_state,
             map_provider="mapbox",
             api_keys={
-                'mapbox': 'pk.eyJ1IjoiZ2lqc3dpdGhhZ2VuIiwiYSI6ImNtYmF6bWw4OTA2Z3QyanNvcnFqd3NqZGMifQ.XKPEq0D0yqxZsMLJQMhTBw'
+                'mapbox': os.environ.get('MAPBOX_API_KEY')
             },
-            # map_style='mapbox://styles/mapbox/light-v10',
             tooltip=tooltip,
-            
         )
         r.to_html(output_html_file_3d)
         print(f"3D Point Cloud Map successfully saved to: {output_html_file_3d}")
@@ -290,6 +288,10 @@ def create_3d_point_cloud_map(
 
 
 if __name__ == '__main__':
+    if not os.environ.get('MAPBOX_API_KEY'):
+        print("environ 'MAPBOX_API_KEY' not set")
+        exit(1)
+
     tif_dsm_files = [
         "datasets/dsm/2024_R_51BZ2.TIF",
         "datasets/dsm/2024_R_51DN2.TIF",
@@ -340,10 +342,10 @@ if __name__ == '__main__':
         bounding_box=(5.482617, 5.494170, 51.445511,51.450016)
     )
 
-    create_3d_point_cloud_map(
-        tif_dtm_files,
-        output_html_file_3d='output/netherlands_dtm_3d_map.html',
-        map_cmap='terrain',
-        subsample_factor=20, 
-        z_scale_factor=1 
-    )
+    # create_3d_point_cloud_map(
+    #     tif_dtm_files,
+    #     output_html_file_3d='output/netherlands_dtm_3d_map.html',
+    #     map_cmap='terrain',
+    #     subsample_factor=20, 
+    #     z_scale_factor=1 
+    # )
