@@ -3,8 +3,7 @@ import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.crs import CRS
 import numpy as np
-import pandas as pd # Added for 3D data handling
-import pydeck # Added for 3D visualization
+import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors
 import os
@@ -259,7 +258,7 @@ def create_3d_point_cloud_map(
     initial_view_state = pdk.ViewState(
         longitude=df_3d['longitude'].mean(),
         latitude=df_3d['latitude'].mean(),
-        zoom=8,
+        zoom=20,
         pitch=45,
         bearing=0
     )
