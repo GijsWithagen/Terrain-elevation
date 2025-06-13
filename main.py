@@ -417,6 +417,9 @@ def find_min_max(raster_path, bounding_box=None, output=None):
         morse_complex = build_morse_complex(vertices)
         analysis_results = compute_gradient_field(morse_complex)
         paired_extrema = pair_extrema_with_saddles(analysis_results, vertices)
+
+        # idea: store paired_extrema to json and try multiple persistence thresholds
+
         filtered = filter_persistent_pairs(paired_extrema, persistence_threshold=7) # Used 7 for now, looks good imo
 
         # Visualize the results on the map.
