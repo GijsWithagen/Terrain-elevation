@@ -1,350 +1,449 @@
-import folium
 import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.warp import calculate_default_transform, reproject, Resampling, transform_bounds
 from rasterio.crs import CRS
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors
 import os
+import random
 import pydeck as pdk
+from rasterio.windows import from_bounds, bounds as window_bounds
+from rasterio.enums import Resampling as ResampleMethod
+from collections import defaultdict
+from scipy.spatial import KDTree
+import traceback
 
-def create_overlay_image(data_array, cmap_name='terrain', nodata_val=None):
+def build_cubical_complex(raster_path, bounding_box=None):
     """
-    Converts a 2D numpy array (raster data) into an RGBA image array using a colormap.
-    Nodata values are made transparent.
-
-    Args:
-        data_array (np.ndarray): The 2D input data.
-        cmap_name (str): Name of the matplotlib colormap to use.
-        nodata_val (float/int, optional): Value representing nodata in data_array. 
-                                          These pixels will be made transparent.
-
-    Returns:
-        np.ndarray: An (height, width, 4) RGBA image array (uint8).
+    Builds a cubical complex from a GeoTIFF file.
     """
-    data_float = data_array.astype(np.float32)
+    with rasterio.open(raster_path) as src:
+        dst_crs = CRS.from_epsg(4326)
+        window = None
+        window_bounds_src = src.bounds
 
-    masked_data = np.ma.array(data_float, mask=False)
-    
-    if nodata_val is not None:
-        if np.isnan(nodata_val):
-            masked_data.mask = np.isnan(data_float)
-        else: 
-            masked_data.mask = (data_float == nodata_val)
+        # Filter to only coordinates within the bounding box
+        if bounding_box:
+            min_lon, max_lon, min_lat, max_lat = bounding_box
+            bbox_src_crs = transform_bounds(dst_crs, src.crs, min_lon, min_lat, max_lon, max_lat)
+            window = from_bounds(*bbox_src_crs, transform=src.transform).round_offsets().round_shape()
+            window_bounds_src = window_bounds(window, src.transform)
 
-    if masked_data.mask.all():
-        return np.zeros((data_array.shape[0], data_array.shape[1], 4), dtype=np.uint8)
+        data = src.read(1, window=window, masked=True)
+        src_transform = src.window_transform(window) if window else src.transform
 
-    valid_data = masked_data.compressed()
-    if valid_data.size == 0: 
-         return np.zeros((data_array.shape[0], data_array.shape[1], 4), dtype=np.uint8)
-
-    vmin = np.min(valid_data)
-    vmax = np.max(valid_data)
-
-    norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
-    cmap = plt.get_cmap(cmap_name)
-
-    rgba_data = cmap(norm(data_float))
-
-    if nodata_val is not None and masked_data.mask.any(): 
-         rgba_data[masked_data.mask, 3] = 0.0 
-
-    rgba_data_uint8 = (rgba_data * 255).astype(np.uint8)
-    
-    return rgba_data_uint8
-
-def display_tifs_on_map(tif_file_paths, output_html_file='elevation_map.html', 
-                        map_cmap='terrain', map_opacity=0.7):
-    netherlands_center = [52.1326, 5.2913]
-    eindhoven_center = [51.439530, 5.478377]
-
-
-    folium_map = folium.Map(location=eindhoven_center, zoom_start=13, tiles="OpenStreetMap")
-
-    print(f"Processing {len(tif_file_paths)} TIF file(s)...")
-
-    for tif_path in tif_file_paths:
-        if not os.path.exists(tif_path):
-            print(f"Warning: File not found, skipping: {tif_path}")
-            continue
+        src_nodata_val = src.nodatavals[0] if src.nodatavals and src.nodatavals[0] is not None else None
+        nodata_for_reprojection = src_nodata_val if src_nodata_val is not None else np.nan
+        dst_affine, dst_width, dst_height = calculate_default_transform(
+            src.crs, dst_crs, data.shape[1], data.shape[0], *window_bounds_src
+        )
+        reprojected_data = np.full((dst_height, dst_width), nodata_for_reprojection, dtype=data.dtype)
         
-        try:
-            print(f"Processing: {tif_path}")
-            with rasterio.open(tif_path) as src:
-                src_crs = src.crs
-                dst_crs = CRS.from_epsg(4326)
+        reproject(
+            source=data, destination=reprojected_data, src_transform=src_transform,
+            src_crs=src.crs, src_nodata=src_nodata_val, dst_transform=dst_affine,
+            dst_crs=dst_crs, dst_nodata=nodata_for_reprojection, resampling=Resampling.nearest
+        )
 
-                transform, width, height = calculate_default_transform(
-                    src_crs, dst_crs, src.width, src.height, *src.bounds
-                )
-                
-                src_nodata_val = src.nodatavals[0] if src.nodatavals and src.nodatavals[0] is not None else None
-                
-                if src_nodata_val is not None:
-                    nodata_for_reprojection_and_overlay = src_nodata_val
-                elif np.issubdtype(src.read(1).dtype, np.floating):
-                    nodata_for_reprojection_and_overlay = np.nan 
-                else: 
-                    nodata_for_reprojection_and_overlay = 0 
+        vertices = {}
+        valid_mask = ~np.isnan(reprojected_data) & (reprojected_data != nodata_for_reprojection)
+        indices = np.argwhere(valid_mask)
 
-                reprojected_array = np.full((height, width), 
-                                            nodata_for_reprojection_and_overlay, 
-                                            dtype=src.read(1).dtype)
+        for i, j in indices:
+            elevation = reprojected_data[i, j]
 
-                reproject(
-                    source=rasterio.band(src, 1), 
-                    destination=reprojected_array,
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    src_nodata=src_nodata_val, 
-                    dst_transform=transform,
-                    dst_crs=dst_crs,
-                    dst_nodata=nodata_for_reprojection_and_overlay, 
-                    resampling=Resampling.nearest 
-                )
+            if bounding_box:
+                lon, lat = rasterio.transform.xy(dst_affine, i, j)
 
-                min_lon, min_lat, max_lon, max_lat = rasterio.transform.array_bounds(
-                    height, width, transform
-                )
-                folium_bounds = [[min_lat, min_lon], [max_lat, max_lon]]
+                if not (min_lon <= lon <= max_lon and min_lat <= lat <= max_lat):
+                    continue
 
-                overlay_image_rgba = create_overlay_image(
-                    reprojected_array, 
-                    cmap_name=map_cmap, 
-                    nodata_val=nodata_for_reprojection_and_overlay # Pass the consistent nodata value
-                )
-                
-                img_overlay = folium.raster_layers.ImageOverlay(
-                    image=overlay_image_rgba, 
-                    bounds=folium_bounds,
-                    opacity=map_opacity,
-                    name=os.path.basename(tif_path),
-                    interactive=True,
-                    cross_origin=False, 
-                    zindex=1 
-                )
-                img_overlay.add_to(folium_map)
-                print(f"Successfully added {os.path.basename(tif_path)} to map.")
+            vertices[(i, j)] = float(elevation)
 
-        except Exception as e:
-            print(f"Error processing file {tif_path}: {e}")
-            import traceback
-            traceback.print_exc()
+        return vertices, reprojected_data, dst_affine
 
-    if len(folium_map._children) > 0: 
-        folium.LayerControl().add_to(folium_map)
-    
-    try:
-        folium_map.save(output_html_file)
-        print(f"\nMap successfully saved to: {output_html_file}")
-        print("You can open this HTML file in your web browser.")
-    except Exception as e:
-        print(f"Error saving map: {e}")
+def build_morse_complex(vertices, epsilon=1e-6):
+    """
+    Constructs a Morse complex, assigning a unique perturbed value to each cell.
+    """
+    f_v = {v: val + random.uniform(0, epsilon) for v, val in vertices.items()}
 
+    edges = {}
+    faces = {}
 
-def create_3d_point_cloud_map(
-        tif_file_paths, 
-        output_html_file_3d='dsm_3d_map.html',
-        map_cmap='terrain', 
-        subsample_factor=20, 
-        z_scale_factor=1,
-        bounding_box=None
-    ):
-    all_points_data = []
-    all_elevations_for_norm = []
+    for (i, j) in vertices:
+        # Horizontal and vertical edges
+        for di, dj in [(0, 1), (1, 0)]:
+            ni, nj = i + di, j + dj
+            neighbor = (ni, nj)
+            if neighbor in vertices:
+                edge = tuple(sorted([(i, j), neighbor]))
+                if edge not in edges:
+                    edges[edge] = max(f_v[(i, j)], f_v[neighbor]) + random.uniform(0, epsilon)
 
-    print(f"\nProcessing {len(tif_file_paths)} TIF file(s) for 3D map...")
+        v1 = (i, j)
+        v2 = (i + 1, j)
+        v3 = (i, j + 1)
+        v4 = (i + 1, j + 1)
+        if all(v in vertices for v in [v1, v2, v3, v4]):
+            e1 = tuple(sorted([v1, v2]))
+            e2 = tuple(sorted([v1, v3]))
+            e3 = tuple(sorted([v2, v4]))
+            e4 = tuple(sorted([v3, v4]))
 
-    for tif_path in tif_file_paths:
-        if not os.path.exists(tif_path):
-            print(f"Warning (3D map): File not found, skipping: {tif_path}")
-            continue
-        try:
-            print(f"Processing (3D map): {tif_path}")
-            with rasterio.open(tif_path) as src:
-                dst_crs = CRS.from_epsg(4326)
-                dst_affine, dst_width, dst_height = calculate_default_transform(
-                    src.crs, dst_crs, src.width, src.height, *src.bounds
-                )
-                src_nodata_val = src.nodatavals[0] if src.nodatavals and src.nodatavals[0] is not None else None
+            for e in [e1, e2, e3, e4]:
+                if e not in edges:
+                    edges[e] = max(f_v[e[0]], f_v[e[1]]) + random.uniform(0, epsilon)
 
-                nodata_for_reprojection = (
-                    src_nodata_val if src_nodata_val is not None
-                    else (np.nan if np.issubdtype(src.read(1).dtype, np.floating) else 0)
-                )
+            face_key = (i, j)
+            face_edges = [e1, e2, e3, e4]
+            faces[face_key] = {
+                "value": max(edges[e] for e in face_edges) + random.uniform(0, epsilon),
+                "edges": face_edges
+            }
 
-                reprojected_data = np.full((dst_height, dst_width), nodata_for_reprojection, dtype=src.read(1).dtype)
-
-                reproject(
-                    source=rasterio.band(src, 1),
-                    destination=reprojected_data,
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    src_nodata=src_nodata_val,
-                    dst_transform=dst_affine,
-                    dst_crs=dst_crs,
-                    dst_nodata=nodata_for_reprojection,
-                    resampling=Resampling.nearest
-                )
-
-                rows, cols = np.indices(reprojected_data.shape)
-                rows_sub = rows[::subsample_factor, ::subsample_factor].ravel()
-                cols_sub = cols[::subsample_factor, ::subsample_factor].ravel()
-                elevations_sub = reprojected_data[rows_sub, cols_sub]
-
-                valid_mask = ~np.isnan(elevations_sub) if np.isnan(nodata_for_reprojection) else (elevations_sub != nodata_for_reprojection)
-
-                rows_sub_valid = rows_sub[valid_mask]
-                cols_sub_valid = cols_sub[valid_mask]
-                elevations_sub_valid = elevations_sub[valid_mask]
-
-                longitudes, latitudes = rasterio.transform.xy(dst_affine, rows_sub_valid, cols_sub_valid)
-
-                for lon, lat, elev in zip(longitudes, latitudes, elevations_sub_valid):
-                    if bounding_box:
-                        min_lon, max_lon, min_lat, max_lat = bounding_box
-                        if not (min_lon <= lon <= max_lon and min_lat <= lat <= max_lat):
-                            continue  # Skip points outside bounding box
-                    all_points_data.append({
-                        'longitude': lon,
-                        'latitude': lat,
-                        'elevation_raw': elev
-                    })
-                    all_elevations_for_norm.append(elev)
-
-            print(f"Finished processing {os.path.basename(tif_path)} for 3D map.")
-        except Exception as e:
-            print(f"Error processing file {tif_path} for 3D map: {e}")
-            import traceback
-            traceback.print_exc()
-
-    valid_elev_array = np.array(all_elevations_for_norm)
-    if valid_elev_array.size == 0:
-        print("No valid elevation values found after processing all files. Cannot create 3D map.")
-        return
-
-    vmin_color = np.percentile(valid_elev_array, 2)
-    vmax_color = np.percentile(valid_elev_array, 98)
-    if vmin_color == vmax_color:
-        vmin_color -= 0.5
-        vmax_color += 0.5
-
-    norm_elev_for_color = matplotlib.colors.Normalize(vmin=vmin_color, vmax=vmax_color)
-    cmap_3d = plt.get_cmap(map_cmap)
-
-    for point in all_points_data:
-        color_rgba_float = cmap_3d(norm_elev_for_color(point['elevation_raw']))
-        point['color'] = (np.array(color_rgba_float[:3]) * 255).astype(np.uint8).tolist()
-        point['elevation'] = point['elevation_raw'] * z_scale_factor
-
-    df_3d = pd.DataFrame(all_points_data)
-    if df_3d.empty:
-        print("DataFrame for 3D map is empty. Cannot generate 3D map.")
-        return
-
-    point_cloud_layer = pdk.Layer(
-        'PointCloudLayer',
-        data=df_3d,
-        get_position='[longitude, latitude, elevation]',
-        get_color='color',
-        get_normal=[0, 0, 1],
-        auto_highlight=True,
-        pickable=True,
-        point_size=3
-    )
-
-    initial_view_state = pdk.ViewState(
-        longitude=df_3d['longitude'].mean(),
-        latitude=df_3d['latitude'].mean(),
-        zoom=20,
-        pitch=45,
-        bearing=0
-    )
-
-    tooltip = {
-        "html": "<b>Elevation:</b> {elevation_raw} m",
-        "style": {"backgroundColor": "steelblue", "color": "white"}
+    return {
+        "vertex_function": f_v,
+        "edges": edges,
+        "faces": faces
     }
 
-    try:
-        r = pdk.Deck(
-            layers=[point_cloud_layer],
-            initial_view_state=initial_view_state,
-            map_provider="mapbox",
-            api_keys={
-                'mapbox': os.environ.get('MAPBOX_API_KEY')
-            },
-            tooltip=tooltip,
-        )
-        r.to_html(output_html_file_3d)
-        print(f"3D Point Cloud Map successfully saved to: {output_html_file_3d}")
-    except Exception as e:
-        print(f"Error creating or saving 3D map with Pydeck: {e}")
-        import traceback
-        traceback.print_exc()
+def compute_gradient_field(morse_complex):
+    """
+    Computes the discrete gradient field by pairing cells.
+    """
+    f_v = morse_complex['vertex_function']
+    edges = morse_complex['edges']
+    faces = morse_complex['faces']
 
+    # Sort all cells by Morse value
+    all_vertices = [(v, 0, f_v[v]) for v in f_v]
+    all_edges = [(e, 1, edges[e]) for e in edges]
+    all_faces = [(f, 2, faces[f]['value']) for f in faces]
+    all_cells = all_vertices + all_edges + all_faces
+    all_cells.sort(key=lambda x: x[2])
+
+    gradient_pairs = {}
+    used_cells = set()
+    vertex_to_edges = defaultdict(list)
+    edge_to_faces = defaultdict(list)
+
+    for edge in edges:
+        v1, v2 = edge
+        vertex_to_edges[v1].append(edge)
+        vertex_to_edges[v2].append(edge)
+
+    for face_key, face_data in faces.items():
+        for edge in face_data['edges']:
+            edge_to_faces[edge].append(face_key)
+
+    # Process pairing
+    for cell, dim, _ in all_cells:
+        if cell in used_cells:
+            continue
+
+        if dim == 0:  # Vertex -> Edge
+            unpaired_edges = [e for e in vertex_to_edges[cell] if e not in used_cells]
+            if len(unpaired_edges) == 1:
+                pair = unpaired_edges[0]
+                gradient_pairs[cell] = pair
+                used_cells.update([cell, pair])
+
+        elif dim == 1:  # Edge -> Face
+            unpaired_faces = [f for f in edge_to_faces[cell] if f not in used_cells]
+            if len(unpaired_faces) == 1:
+                pair = unpaired_faces[0]
+                gradient_pairs[cell] = pair
+                used_cells.update([cell, pair])
+
+    # Extract critical cells
+    paired_cells = set(gradient_pairs.keys()) | set(gradient_pairs.values())
+    critical_0, critical_1, critical_2 = [], [], []
+
+    for cell, dim, _ in all_cells:
+        if cell not in paired_cells:
+            if dim == 0:
+                critical_0.append(cell)
+            elif dim == 1:
+                critical_1.append(cell)
+            elif dim == 2:
+                critical_2.append(cell)
+
+    return {
+        "critical_cells": {
+            "0_minima": critical_0,
+            "1_saddles": critical_1,
+            "2_maxima": critical_2
+        },
+    }
+
+def visualize_filtered_critical_points(
+    vertices,
+    reprojected_data,
+    dst_affine,
+    filtered_minima=None,
+    filtered_maxima=None,
+    output_html_file='output/critical_points_map.html',
+    subsample_factor=5,
+    z_scale_factor=1.5
+):
+    """
+    Creates a 3D Pydeck map to visualize the terrain and its critical points.
+    Only shows filtered minima and maxima.
+    """
+    
+    all_points_data = []
+    critical_points_data = []
+
+    # Terrain sampling
+    rows, cols = np.indices(reprojected_data.shape)
+    rows_sub = rows[::subsample_factor, ::subsample_factor]
+    cols_sub = cols[::subsample_factor, ::subsample_factor]
+    elevations_sub = reprojected_data[::subsample_factor, ::subsample_factor]
+    valid_mask = ~np.isnan(elevations_sub)
+
+    # Get coordinates for terrain
+    longitudes, latitudes = rasterio.transform.xy(dst_affine, rows_sub[valid_mask], cols_sub[valid_mask])
+    elevations = elevations_sub[valid_mask]
+    
+    # Normalize colors using terrain colormap
+    norm = matplotlib.colors.Normalize(vmin=np.percentile(elevations, 5), vmax=np.percentile(elevations, 95))
+    cmap = plt.get_cmap('Greys')  
+
+    for lon, lat, elev in zip(longitudes, latitudes, elevations):
+        color_rgba = cmap(norm(elev))
+        all_points_data.append({
+            'longitude': lon,
+            'latitude': lat,
+            'elevation': elev * z_scale_factor,
+            'color': (np.array(color_rgba[:3]) * 255).astype(int).tolist()
+        })
+
+    # Add filtered minima in blue
+    if filtered_minima:
+        for r, c in filtered_minima:
+            lon, lat = rasterio.transform.xy(dst_affine, r, c)
+            elev = vertices.get((r, c), 0)
+            critical_points_data.append({
+                'longitude': lon,
+                'latitude': lat,
+                'elevation': (elev + 2) * z_scale_factor,
+                'type': 'Minima',
+                'color': [0, 0, 255]
+            })
+
+    # Add filtered maxima in red
+    if filtered_maxima:
+        for r, c in filtered_maxima:
+            lon, lat = rasterio.transform.xy(dst_affine, r + 0.5, c + 0.5)
+            elev = vertices.get((r, c), 0)
+            critical_points_data.append({
+                'longitude': lon,
+                'latitude': lat,
+                'elevation': (elev + 2) * z_scale_factor,
+                'type': 'Maxima',
+                'color': [255, 0, 0]
+            })
+
+    df_terrain = pd.DataFrame(all_points_data)
+    df_critical = pd.DataFrame(critical_points_data)
+
+    # Pydeck layers
+    terrain_layer = pdk.Layer(
+        'PointCloudLayer',
+        data=df_terrain,
+        get_position='[longitude, latitude, elevation]',
+        get_color='color',
+        point_size=1
+    )
+
+    critical_points_layer = pdk.Layer(
+        'ScatterplotLayer',
+        data=df_critical,
+        get_position='[longitude, latitude, elevation]',
+        get_fill_color='color',
+        get_radius=2,
+        pickable=True
+    )
+
+    view_state = pdk.ViewState(
+        longitude=df_terrain['longitude'].mean(),
+        latitude=df_terrain['latitude'].mean(),
+        zoom=15,
+        pitch=50
+    )
+
+    tooltip = {"html": "<b>{type}</b>"}
+
+    r = pdk.Deck(
+        layers=[terrain_layer, critical_points_layer],
+        initial_view_state=view_state,
+        map_provider="mapbox",
+        api_keys={'mapbox': os.environ.get('MAPBOX_API_KEY')},
+        tooltip=tooltip
+    )
+
+    os.makedirs(os.path.dirname(output_html_file), exist_ok=True)
+    r.to_html(output_html_file)
+    print(f"3D map with filtered critical points saved to: {output_html_file}")
+
+def pair_extrema_with_saddles(analysis_results, vertices, k_neighbors=5):
+    """
+    Pair extrema (minima, maxima) with nearby saddle points using spatial KDTree for performance. Only checks the k nearest neighbours.
+    """
+    minima = analysis_results['critical_cells'].get('0_minima', [])
+    maxima = analysis_results['critical_cells'].get('2_maxima', [])
+    saddles = analysis_results['critical_cells'].get('1_saddles', [])
+
+    if not saddles:
+        print("No saddle points.")
+        return {'min_saddle_pairs': [], 'max_saddle_pairs': []}
+
+    # Compute midpoints of saddle edges and store average location and elevation
+    saddle_points_info = []
+    saddle_coords_for_tree = []
+
+    for s1_rc, s2_rc in saddles:
+        # Calculate midpoint coordinates for the edge
+        mid_r = (s1_rc[0] + s2_rc[0]) / 2
+        mid_c = (s1_rc[1] + s2_rc[1]) / 2
+        
+        # Calculate average elevation for the edge
+        mid_elev = (vertices.get(s1_rc, np.nan) + vertices.get(s2_rc, np.nan)) / 2
+        
+        if np.isnan(mid_elev):
+            print(f"WARN: Could not get elevation for one or both vertices of saddle {s1_rc}-{s2_rc}. Skip")
+            continue
+
+        saddle_points_info.append({'rc': (mid_r, mid_c), 'elevation': mid_elev})
+        saddle_coords_for_tree.append((mid_r, mid_c))
+
+    if not saddle_coords_for_tree:
+        print("No valid saddle coordinates.")
+        return {'min_saddle_pairs': [], 'max_saddle_pairs': []}
+        
+    # KDTree for fast spatial lookup of coordinates
+    tree = KDTree(saddle_coords_for_tree)
+
+    def find_best_pair_for_extremum(extrema_list, kind='min'):
+        """
+        Helper function to find the best saddle pair for a list of extrema.
+        """
+        results = []
+        for ext_rc in extrema_list:
+            ext_r, ext_c = ext_rc
+            ext_elev = vertices.get(ext_rc, np.nan)
+            
+            if np.isnan(ext_elev):
+                print(f"Warning: Could not get elevation for extremum {ext_rc}. Skipping.")
+                continue
+
+            # Query k nearest saddles
+            _, indices = tree.query((ext_r, ext_c), k=k_neighbors)
+
+            best_saddle_info_idx = None 
+            best_persistence_val = -1
+            
+            # Iterate over all k nearest neighbours and find the best one
+            for i, idx in enumerate(indices):
+                # Check if index is within bounds
+                if idx >= len(saddle_points_info) or idx < 0:
+                    continue
+                
+                current_saddle_info = saddle_points_info[idx]
+                current_saddle_elev = current_saddle_info['elevation']
+                current_persistence = abs(ext_elev - current_saddle_elev)
+
+                # Check if current is better than current best
+                is_suitable_saddle = False
+                if kind == 'min':
+                    if current_saddle_elev >= ext_elev:
+                        if best_saddle_info_idx is None or current_saddle_elev < saddle_points_info[best_saddle_info_idx]['elevation']:
+                            is_suitable_saddle = True
+                elif kind == 'max':
+                    if current_saddle_elev <= ext_elev:
+                        if best_saddle_info_idx is None or current_saddle_elev > saddle_points_info[best_saddle_info_idx]['elevation']:
+                            is_suitable_saddle = True
+                
+                # Update the best option if current is better
+                if is_suitable_saddle:
+                    best_saddle_info_idx = idx
+                    best_persistence_val = current_persistence
+
+            # Add the best option to the results
+            if best_saddle_info_idx is not None:
+                best_saddle_rc = saddle_points_info[best_saddle_info_idx]['rc'] 
+                results.append((ext_rc, best_saddle_rc, best_persistence_val))
+           
+        print(f"Paired {len(results)} {kind} with saddles.")
+        return results
+
+    min_saddle_pairs = find_best_pair_for_extremum(minima, 'min')
+    max_saddle_pairs = find_best_pair_for_extremum(maxima, 'max')
+
+    return {
+        'min_saddle_pairs': min_saddle_pairs,
+        'max_saddle_pairs': max_saddle_pairs
+    }
+
+def filter_persistent_pairs(pairs, persistence_threshold=10):
+    """
+    Filters minima–saddle and maxima–saddle pairs based on persistence.
+    """
+    min_pairs = pairs.get('min_saddle_pairs', [])
+    max_pairs = pairs.get('max_saddle_pairs', [])
+
+    filtered_minima = [min_cell for (min_cell, _, persistence) in min_pairs if persistence >= persistence_threshold]
+    filtered_maxima = [max_cell for (max_cell, _, persistence) in max_pairs if persistence >= persistence_threshold]
+
+    return {
+        'filtered_minima': filtered_minima,
+        'filtered_maxima': filtered_maxima
+    }
+
+def find_min_max(raster_path, bounding_box=None, output=None):
+    try:
+        vertices, reprojected_data, dst_affine = build_cubical_complex(
+            raster_path=raster_path,
+            bounding_box=bounding_box
+        )
+
+        if not vertices:
+            print("\nWARN: No vertices found")
+            return
+
+        # Perform the steps described by Celine.
+        morse_complex = build_morse_complex(vertices)
+        analysis_results = compute_gradient_field(morse_complex)
+        paired_extrema = pair_extrema_with_saddles(analysis_results, vertices)
+        filtered = filter_persistent_pairs(paired_extrema, persistence_threshold=7) # Used 7 for now, looks good imo
+
+        # Visualize the results on the map.
+        visualize_filtered_critical_points(
+            vertices,
+            reprojected_data,
+            dst_affine,
+            filtered_minima=filtered['filtered_minima'],
+            filtered_maxima=filtered['filtered_maxima'],
+            output_html_file=f"output/{os.path.splitext(os.path.basename(raster_path))[0]}-min_max.html" if output is None else output
+        )
+    except FileNotFoundError:
+        print(f"\nERROR: Input file not found at '{input_raster}'.")
+    except Exception as e:
+        print(f"\nERROR: An unexpected error occurred: {e}")
+        traceback.print_exc()
 
 if __name__ == '__main__':
     if not os.environ.get('MAPBOX_API_KEY'):
-        print("environ 'MAPBOX_API_KEY' not set")
-        exit(1)
-
-    tif_dsm_files = [
-        "datasets/dsm/2024_R_51BZ2.TIF",
-        "datasets/dsm/2024_R_51DN2.TIF",
-        "datasets/dsm/2024_R_51EZ1.TIF",
-        "datasets/dsm/2024_R_51GN1.TIF",
-    ]
-
-    tif_dtm_files = [
-        "datasets/dtm/2024_M5_51BZ2.TIF",
-        "datasets/dtm/2024_M5_51DN2.TIF",
-        "datasets/dtm/2024_M5_51EZ1.TIF",
-        "datasets/dtm/2024_M5_51GN1.TIF",
-    ]
-
-    # display_tifs_on_map(
-    #     tif_dsm_files, 
-    #     output_html_file='output/netherlands_dsm_2d_map.html', 
-    #     map_cmap='terrain', 
-    #     map_opacity=0.75
-    # )
-
-    # display_tifs_on_map(
-    #     tif_dtm_files, 
-    #     output_html_file='output/netherlands_dtm_2d_map.html', 
-    #     map_cmap='terrain', 
-    #     map_opacity=0.75
-    # )
+        print("WARN: Environment variable 'MAPBOX_API_KEY' not set. Visualizations will fail.")
     
-    create_3d_point_cloud_map(
-        [
-         "datasets/dsm/2024_R_51GN1.TIF",
-        ],
-        output_html_file_3d='output/atlas_3d.html',
-        map_cmap='terrain',
-        subsample_factor=1, 
-        z_scale_factor=1,
-        bounding_box=(5.484705, 5.486861, 51.446943, 51.448714)
-    )
+    input_raster = "datasets/dsm/2024_R_51GN1.TIF"
 
-    create_3d_point_cloud_map(
-        [
-         "datasets/dsm/2024_R_51GN1.TIF",
-        ],
-        output_html_file_3d='output/campus_3d.html',
-        map_cmap='terrain',
-        subsample_factor=1, 
-        z_scale_factor=1,
-        bounding_box=(5.482617, 5.494170, 51.445511,51.450016)
-    )
+    atlas_bbox = (5.484705, 5.486861, 51.446943, 51.448714)
+    campus_bbox= (5.482617, 5.494170, 51.445511, 51.450016)
 
-    # create_3d_point_cloud_map(
-    #     tif_dtm_files,
-    #     output_html_file_3d='output/netherlands_dtm_3d_map.html',
-    #     map_cmap='terrain',
-    #     subsample_factor=20, 
-    #     z_scale_factor=1 
-    # )
+    # find_min_max(input_raster, atlas_bbox, , "output/atlas_min_max.html")
+    find_min_max(input_raster, campus_bbox, "output/campus_min_max.html")
+
+    
