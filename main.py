@@ -10,9 +10,11 @@ import random
 import pydeck as pdk
 from rasterio.windows import from_bounds, bounds as window_bounds
 from rasterio.enums import Resampling as ResampleMethod
+from rasterio.fill import fillnodata
 from collections import defaultdict
 from scipy.spatial import KDTree
 import traceback
+
 
 def build_cubical_complex(raster_path, bounding_box=None):
     """
@@ -437,18 +439,37 @@ def find_min_max(raster_path, bounding_box=None, output=None):
         print(f"\nERROR: An unexpected error occurred: {e}")
         traceback.print_exc()
 
+def fill_missing_values(raster_path):
+    """
+    Fills missing values in a raster file with the mean of the surrounding pixels.
+    """
+    with rasterio.open("datasets/dsm/" + raster_path) as src:
+        data = src.read(1)
+        msk = src.read_masks()
+
+        
+        filled_data = fillnodata(data, mask=msk, max_search_distance=100, smoothing_iterations=0)
+
+        # Write the filled data back to the raster file
+        with rasterio.open("datasets/dsm/FILL_" + raster_path, 'w', **src.meta) as dst:
+            dst.write(filled_data, 1)
+            dst.close()
+        src.close()
+
 if __name__ == '__main__':
     if not os.environ.get('MAPBOX_API_KEY'):
-        print("WARN: Environment variable 'MAPBOX_API_KEY' not set. Visualizations will fail.")
+        os.environ['MAPBOX_API_KEY'] = 'pk.eyJ1IjoiZ2lqc3dpdGhhZ2VuIiwiYSI6ImNtYmF6bWw4OTA2Z3QyanNvcnFqd3NqZGMifQ.XKPEq0D0yqxZsMLJQMhTBw'
     
-    input_raster = "datasets/dsm/2024_R_51GN1.TIF"
+    input_raster = "2024_R_51GN1.TIF"
 
     atlas_bbox = (5.484705, 5.486861, 51.446943, 51.448714)
     campus_bbox= (5.482617, 5.494170, 51.445511, 51.450016)
     waters_man_bbox= (5.496532, 5.503750, 51.447776, 51.456504)
+    
+    fill_missing_values(input_raster)
 
     # find_min_max(input_raster, atlas_bbox, , "output/atlas_min_max.html")
     # find_min_max(input_raster, campus_bbox, "output/campus_min_max.html")
-    find_min_max(input_raster, waters_man_bbox, "output/water_min_max.html")
+    find_min_max("datasets/dsm/FILL_" + input_raster, waters_man_bbox, "output/100inter_water_min_max.html")
 
     

@@ -1,4 +1,4 @@
-#!/bin/bash
+!/bin/bash
 
 # Create the datasets directory if it doesn't exist
 mkdir -p datasets

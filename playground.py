@@ -289,7 +289,7 @@ def create_3d_point_cloud_map(
 if __name__ == '__main__':
     if not os.environ.get('MAPBOX_API_KEY'):
         print("environ 'MAPBOX_API_KEY' not set")
-        exit(1)
+        #exit(1)
 
     tif_dsm_files = [
         "datasets/dsm/2024_R_51BZ2.TIF",
