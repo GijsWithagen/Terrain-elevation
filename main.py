@@ -445,8 +445,10 @@ if __name__ == '__main__':
 
     atlas_bbox = (5.484705, 5.486861, 51.446943, 51.448714)
     campus_bbox= (5.482617, 5.494170, 51.445511, 51.450016)
+    waters_man_bbox= (5.496532, 5.503750, 51.447776, 51.456504)
 
     # find_min_max(input_raster, atlas_bbox, , "output/atlas_min_max.html")
-    find_min_max(input_raster, campus_bbox, "output/campus_min_max.html")
+    # find_min_max(input_raster, campus_bbox, "output/campus_min_max.html")
+    find_min_max(input_raster, waters_man_bbox, "output/water_min_max.html")
 
     

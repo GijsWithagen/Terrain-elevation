@@ -305,12 +305,12 @@ if __name__ == '__main__':
         "datasets/dtm/2024_M5_51GN1.TIF",
     ]
 
-    # display_tifs_on_map(
-    #     tif_dsm_files, 
-    #     output_html_file='output/netherlands_dsm_2d_map.html', 
-    #     map_cmap='terrain', 
-    #     map_opacity=0.75
-    # )
+    display_tifs_on_map(
+        tif_dsm_files, 
+        output_html_file='output/netherlands_dsm_2d_map.html', 
+        map_cmap='terrain', 
+        map_opacity=0.75
+    )
 
     # display_tifs_on_map(
     #     tif_dtm_files, 
@@ -319,27 +319,27 @@ if __name__ == '__main__':
     #     map_opacity=0.75
     # )
     
-    create_3d_point_cloud_map(
-        [
-         "datasets/dsm/2024_R_51GN1.TIF",
-        ],
-        output_html_file_3d='output/atlas_3d.html',
-        map_cmap='terrain',
-        subsample_factor=1, 
-        z_scale_factor=1,
-        bounding_box=(5.484705, 5.486861, 51.446943, 51.448714)
-    )
+    # create_3d_point_cloud_map(
+    #     [
+    #      "datasets/dsm/2024_R_51GN1.TIF",
+    #     ],
+    #     output_html_file_3d='output/atlas_3d.html',
+    #     map_cmap='terrain',
+    #     subsample_factor=1, 
+    #     z_scale_factor=1,
+    #     bounding_box=(5.484705, 5.486861, 51.446943, 51.448714)
+    # )
 
-    create_3d_point_cloud_map(
-        [
-         "datasets/dsm/2024_R_51GN1.TIF",
-        ],
-        output_html_file_3d='output/campus_3d.html',
-        map_cmap='terrain',
-        subsample_factor=1, 
-        z_scale_factor=1,
-        bounding_box=(5.482617, 5.494170, 51.445511,51.450016)
-    )
+    # create_3d_point_cloud_map(
+    #     [
+    #      "datasets/dsm/2024_R_51GN1.TIF",
+    #     ],
+    #     output_html_file_3d='output/campus_3d.html',
+    #     map_cmap='terrain',
+    #     subsample_factor=1, 
+    #     z_scale_factor=1,
+    #     bounding_box=(5.482617, 5.494170, 51.445511,51.450016)
+    # )
 
     # create_3d_point_cloud_map(
     #     tif_dtm_files,
